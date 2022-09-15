@@ -34,7 +34,7 @@ use bevy_render::{
     renderer::RenderDevice,
     texture::TextureCache,
     view::ViewDepthTexture,
-    RenderApp, RenderStage,
+    Extract, RenderApp, RenderStage,
 };
 use bevy_utils::{FloatOrd, HashMap};
 
@@ -43,6 +43,7 @@ pub struct Core3dPlugin;
 impl Plugin for Core3dPlugin {
     fn build(&self, app: &mut App) {
         app.register_type::<Camera3d>()
+            .register_type::<Camera3dDepthLoadOp>()
             .add_plugin(ExtractComponentPlugin::<Camera3d>::default());
 
         let render_app = match app.get_sub_app_mut(RenderApp) {
@@ -208,7 +209,7 @@ impl CachedRenderPipelinePhaseItem for Transparent3d {
 
 pub fn extract_core_3d_camera_phases(
     mut commands: Commands,
-    cameras_3d: Query<(Entity, &Camera), With<Camera3d>>,
+    cameras_3d: Extract<Query<(Entity, &Camera), With<Camera3d>>>,
 ) {
     for (entity, camera) in cameras_3d.iter() {
         if camera.is_active {
@@ -236,7 +237,7 @@ pub fn prepare_core_3d_depth_textures(
     >,
 ) {
     let mut textures = HashMap::default();
-    for (entity, camera) in views_3d.iter() {
+    for (entity, camera) in &views_3d {
         if let Some(physical_target_size) = camera.physical_target_size {
             let cached_texture = textures
                 .entry(camera.target.clone())

@@ -5,6 +5,7 @@ use crate::{
 use bevy_app::{App, Plugin};
 use bevy_asset::{AddAsset, AssetEvent, AssetServer, Assets, Handle};
 use bevy_core_pipeline::core_3d::{AlphaMask3d, Opaque3d, Transparent3d};
+use bevy_derive::{Deref, DerefMut};
 use bevy_ecs::{
     entity::Entity,
     event::EventReader,
@@ -12,7 +13,7 @@ use bevy_ecs::{
     schedule::ParallelSystemDescriptorCoercion,
     system::{
         lifetimeless::{Read, SQuery, SRes},
-        Commands, Local, Query, Res, ResMut, SystemParamItem,
+        Commands, Local, Query, Res, ResMut, Resource, SystemParamItem,
     },
     world::FromWorld,
 };
@@ -34,7 +35,7 @@ use bevy_render::{
     renderer::RenderDevice,
     texture::FallbackImage,
     view::{ExtractedView, Msaa, VisibleEntities},
-    RenderApp, RenderStage,
+    Extract, RenderApp, RenderStage,
 };
 use bevy_utils::{tracing::error, HashMap, HashSet};
 use std::hash::Hash;
@@ -97,14 +98,14 @@ use std::marker::PhantomData;
 ///
 /// ```wgsl
 /// struct CustomMaterial {
-///     color: vec4<f32>;
-/// };
+///     color: vec4<f32>,
+/// }
 ///
-/// [[group(1), binding(0)]]
+/// @group(1) @binding(0)
 /// var<uniform> material: CustomMaterial;
-/// [[group(1), binding(1)]]
+/// @group(1) @binding(1)
 /// var color_texture: texture_2d<f32>;
-/// [[group(1), binding(2)]]
+/// @group(1) @binding(2)
 /// var color_sampler: sampler;
 /// ```
 pub trait Material: AsBindGroup + Send + Sync + Clone + TypeUuid + Sized + 'static {
@@ -224,6 +225,7 @@ where
 }
 
 /// Render pipeline data for a given [`Material`].
+#[derive(Resource)]
 pub struct MaterialPipeline<M: Material> {
     pub mesh_pipeline: MeshPipeline,
     pub material_layout: BindGroupLayout,
@@ -333,7 +335,7 @@ pub fn queue_material_meshes<M: Material>(
     M::Data: PartialEq + Eq + Hash + Clone,
 {
     for (view, visible_entities, mut opaque_phase, mut alpha_mask_phase, mut transparent_phase) in
-        views.iter_mut()
+        &mut views
     {
         let draw_opaque_pbr = opaque_draw_functions
             .read()
@@ -434,6 +436,7 @@ pub struct PreparedMaterial<T: Material> {
     pub properties: MaterialProperties,
 }
 
+#[derive(Resource)]
 struct ExtractedMaterials<M: Material> {
     extracted: Vec<(Handle<M>, M)>,
     removed: Vec<Handle<M>>,
@@ -449,21 +452,28 @@ impl<M: Material> Default for ExtractedMaterials<M> {
 }
 
 /// Stores all prepared representations of [`Material`] assets for as long as they exist.
-pub type RenderMaterials<T> = HashMap<Handle<T>, PreparedMaterial<T>>;
+#[derive(Resource, Deref, DerefMut)]
+pub struct RenderMaterials<T: Material>(pub HashMap<Handle<T>, PreparedMaterial<T>>);
+
+impl<T: Material> Default for RenderMaterials<T> {
+    fn default() -> Self {
+        Self(Default::default())
+    }
+}
 
 /// This system extracts all created or modified assets of the corresponding [`Material`] type
 /// into the "render world".
 fn extract_materials<M: Material>(
     mut commands: Commands,
-    mut events: EventReader<AssetEvent<M>>,
-    assets: Res<Assets<M>>,
+    mut events: Extract<EventReader<AssetEvent<M>>>,
+    assets: Extract<Res<Assets<M>>>,
 ) {
     let mut changed_assets = HashSet::default();
     let mut removed = Vec::new();
     for event in events.iter() {
         match event {
             AssetEvent::Created { handle } | AssetEvent::Modified { handle } => {
-                changed_assets.insert(handle);
+                changed_assets.insert(handle.clone_weak());
             }
             AssetEvent::Removed { handle } => {
                 changed_assets.remove(handle);
@@ -474,8 +484,8 @@ fn extract_materials<M: Material>(
 
     let mut extracted_assets = Vec::new();
     for handle in changed_assets.drain() {
-        if let Some(asset) = assets.get(handle) {
-            extracted_assets.push((handle.clone_weak(), asset.clone()));
+        if let Some(asset) = assets.get(&handle) {
+            extracted_assets.push((handle, asset.clone()));
         }
     }
 

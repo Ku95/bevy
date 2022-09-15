@@ -1,5 +1,6 @@
 use crate::{serde::SceneSerializer, Scene, SceneSpawnError};
 use anyhow::Result;
+use bevy_app::AppTypeRegistry;
 use bevy_ecs::{
     entity::EntityMap,
     reflect::{ReflectComponent, ReflectMapEntities},
@@ -77,14 +78,14 @@ impl DynamicScene {
 
     /// Write the dynamic entities and their corresponding components to the given world.
     ///
-    /// This method will return a `SceneSpawnError` if either a type is not registered
-    /// or doesn't reflect the `Component` trait.
+    /// This method will return a [`SceneSpawnError`] if a type either is not registered
+    /// or doesn't reflect the [`Component`](bevy_ecs::component::Component) trait.
     pub fn write_to_world(
         &self,
         world: &mut World,
         entity_map: &mut EntityMap,
     ) -> Result<(), SceneSpawnError> {
-        let registry = world.resource::<TypeRegistryArc>().clone();
+        let registry = world.resource::<AppTypeRegistry>().clone();
         let type_registry = registry.read();
 
         for scene_entity in &self.entities {
@@ -112,14 +113,7 @@ impl DynamicScene {
                 // If the entity already has the given component attached,
                 // just apply the (possibly) new value, otherwise add the
                 // component to the entity.
-                if world
-                    .entity(entity)
-                    .contains_type_id(registration.type_id())
-                {
-                    reflect_component.apply(world, entity, &**component);
-                } else {
-                    reflect_component.add(world, entity, &**component);
-                }
+                reflect_component.apply_or_insert(world, entity, &**component);
             }
         }
 
@@ -147,7 +141,6 @@ where
     S: Serialize,
 {
     let pretty_config = ron::ser::PrettyConfig::default()
-        .decimal_floats(true)
         .indentor("  ".to_string())
         .new_line("\n".to_string());
     ron::ser::to_string_pretty(&serialize, pretty_config)

@@ -1,7 +1,7 @@
 //! Types that enable reflection support.
 
-pub use crate::change_detection::ReflectMut;
 use crate::{
+    change_detection::Mut,
     component::Component,
     entity::{Entity, EntityMap, MapEntities, MapEntitiesError},
     system::Resource,
@@ -18,11 +18,12 @@ use bevy_reflect::{
 /// [`bevy_reflect::TypeRegistration::data`].
 #[derive(Clone)]
 pub struct ReflectComponent {
-    add: fn(&mut World, Entity, &dyn Reflect),
+    insert: fn(&mut World, Entity, &dyn Reflect),
     apply: fn(&mut World, Entity, &dyn Reflect),
+    apply_or_insert: fn(&mut World, Entity, &dyn Reflect),
     remove: fn(&mut World, Entity),
     reflect: fn(&World, Entity) -> Option<&dyn Reflect>,
-    reflect_mut: unsafe fn(&World, Entity) -> Option<ReflectMut>,
+    reflect_mut: unsafe fn(&World, Entity) -> Option<Mut<dyn Reflect>>,
     copy: fn(&World, &mut World, Entity, Entity),
 }
 
@@ -32,8 +33,8 @@ impl ReflectComponent {
     /// # Panics
     ///
     /// Panics if there is no such entity.
-    pub fn add(&self, world: &mut World, entity: Entity, component: &dyn Reflect) {
-        (self.add)(world, entity, component);
+    pub fn insert(&self, world: &mut World, entity: Entity, component: &dyn Reflect) {
+        (self.insert)(world, entity, component);
     }
 
     /// Uses reflection to set the value of this [`Component`] type in the entity to the given value.
@@ -43,6 +44,15 @@ impl ReflectComponent {
     /// Panics if there is no [`Component`] of the given type or the `entity` does not exist.
     pub fn apply(&self, world: &mut World, entity: Entity, component: &dyn Reflect) {
         (self.apply)(world, entity, component);
+    }
+
+    /// Uses reflection to set the value of this [`Component`] type in the entity to the given value or insert a new one if it does not exist.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the `entity` does not exist.
+    pub fn apply_or_insert(&self, world: &mut World, entity: Entity, component: &dyn Reflect) {
+        (self.apply_or_insert)(world, entity, component);
     }
 
     /// Removes this [`Component`] type from the entity. Does nothing if it doesn't exist.
@@ -60,7 +70,11 @@ impl ReflectComponent {
     }
 
     /// Gets the value of this [`Component`] type from the entity as a mutable reflected reference.
-    pub fn reflect_mut<'a>(&self, world: &'a mut World, entity: Entity) -> Option<ReflectMut<'a>> {
+    pub fn reflect_mut<'a>(
+        &self,
+        world: &'a mut World,
+        entity: Entity,
+    ) -> Option<Mut<'a, dyn Reflect>> {
         // SAFETY: unique world access
         unsafe { (self.reflect_mut)(world, entity) }
     }
@@ -75,7 +89,7 @@ impl ReflectComponent {
         &self,
         world: &'a World,
         entity: Entity,
-    ) -> Option<ReflectMut<'a>> {
+    ) -> Option<Mut<'a, dyn Reflect>> {
         (self.reflect_mut)(world, entity)
     }
 
@@ -103,7 +117,7 @@ impl ReflectComponent {
 impl<C: Component + Reflect + FromWorld> FromType<C> for ReflectComponent {
     fn from_type() -> Self {
         ReflectComponent {
-            add: |world, entity, reflected_component| {
+            insert: |world, entity, reflected_component| {
                 let mut component = C::from_world(world);
                 component.apply(reflected_component);
                 world.entity_mut(entity).insert(component);
@@ -111,6 +125,15 @@ impl<C: Component + Reflect + FromWorld> FromType<C> for ReflectComponent {
             apply: |world, entity, reflected_component| {
                 let mut component = world.get_mut::<C>(entity).unwrap();
                 component.apply(reflected_component);
+            },
+            apply_or_insert: |world, entity, reflected_component| {
+                if let Some(mut component) = world.get_mut::<C>(entity) {
+                    component.apply(reflected_component);
+                } else {
+                    let mut component = C::from_world(world);
+                    component.apply(reflected_component);
+                    world.entity_mut(entity).insert(component);
+                }
             },
             remove: |world, entity| {
                 world.entity_mut(entity).remove::<C>();
@@ -136,7 +159,7 @@ impl<C: Component + Reflect + FromWorld> FromType<C> for ReflectComponent {
                     world
                         .get_entity(entity)?
                         .get_unchecked_mut::<C>(world.last_change_tick(), world.read_change_tick())
-                        .map(|c| ReflectMut {
+                        .map(|c| Mut {
                             value: c.value as &mut dyn Reflect,
                             ticks: c.ticks,
                         })
@@ -154,9 +177,10 @@ impl<C: Component + Reflect + FromWorld> FromType<C> for ReflectComponent {
 pub struct ReflectResource {
     insert: fn(&mut World, &dyn Reflect),
     apply: fn(&mut World, &dyn Reflect),
+    apply_or_insert: fn(&mut World, &dyn Reflect),
     remove: fn(&mut World),
     reflect: fn(&World) -> Option<&dyn Reflect>,
-    reflect_unchecked_mut: unsafe fn(&World) -> Option<ReflectMut>,
+    reflect_unchecked_mut: unsafe fn(&World) -> Option<Mut<dyn Reflect>>,
     copy: fn(&World, &mut World),
 }
 
@@ -175,6 +199,11 @@ impl ReflectResource {
         (self.apply)(world, resource);
     }
 
+    /// Uses reflection to set the value of this [`Resource`] type in the world to the given value or insert a new one if it does not exist.
+    pub fn apply_or_insert(&self, world: &mut World, resource: &dyn Reflect) {
+        (self.apply_or_insert)(world, resource);
+    }
+
     /// Removes this [`Resource`] type from the world. Does nothing if it doesn't exist.
     pub fn remove(&self, world: &mut World) {
         (self.remove)(world);
@@ -186,7 +215,7 @@ impl ReflectResource {
     }
 
     /// Gets the value of this [`Resource`] type from the world as a mutable reflected reference.
-    pub fn reflect_mut<'a>(&self, world: &'a mut World) -> Option<ReflectMut<'a>> {
+    pub fn reflect_mut<'a>(&self, world: &'a mut World) -> Option<Mut<'a, dyn Reflect>> {
         // SAFETY: unique world access
         unsafe { (self.reflect_unchecked_mut)(world) }
     }
@@ -197,7 +226,10 @@ impl ReflectResource {
     /// * Only call this method in an exclusive system to avoid sharing across threads (or use a
     ///   scheduler that enforces safe memory access).
     /// * Don't call this method more than once in the same scope for a given [`Resource`].
-    pub unsafe fn reflect_unchecked_mut<'a>(&self, world: &'a World) -> Option<ReflectMut<'a>> {
+    pub unsafe fn reflect_unchecked_mut<'a>(
+        &self,
+        world: &'a World,
+    ) -> Option<Mut<'a, dyn Reflect>> {
         // SAFETY: caller promises to uphold uniqueness guarantees
         (self.reflect_unchecked_mut)(world)
     }
@@ -224,6 +256,15 @@ impl<C: Resource + Reflect + FromWorld> FromType<C> for ReflectResource {
                 let mut resource = world.resource_mut::<C>();
                 resource.apply(reflected_resource);
             },
+            apply_or_insert: |world, reflected_resource| {
+                if let Some(mut resource) = world.get_resource_mut::<C>() {
+                    resource.apply(reflected_resource);
+                } else {
+                    let mut resource = C::from_world(world);
+                    resource.apply(reflected_resource);
+                    world.insert_resource(resource);
+                }
+            },
             remove: |world| {
                 world.remove_resource::<C>();
             },
@@ -232,12 +273,10 @@ impl<C: Resource + Reflect + FromWorld> FromType<C> for ReflectResource {
                 // SAFETY: all usages of `reflect_unchecked_mut` guarantee that there is either a single mutable
                 // reference or multiple immutable ones alive at any given point
                 unsafe {
-                    world
-                        .get_resource_unchecked_mut::<C>()
-                        .map(|res| ReflectMut {
-                            value: res.value as &mut dyn Reflect,
-                            ticks: res.ticks,
-                        })
+                    world.get_resource_unchecked_mut::<C>().map(|res| Mut {
+                        value: res.value as &mut dyn Reflect,
+                        ticks: res.ticks,
+                    })
                 }
             },
             copy: |source_world, destination_world| {

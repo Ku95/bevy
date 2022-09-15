@@ -24,7 +24,7 @@ use super::Resource;
 /// # use bevy_ecs::prelude::*;
 /// # use bevy_ecs::system::Command;
 /// // Our world resource
-/// #[derive(Default)]
+/// #[derive(Resource, Default)]
 /// struct Counter(u64);
 ///
 /// // Our custom command
@@ -45,9 +45,14 @@ pub trait Command: Send + Sync + 'static {
     fn write(self, world: &mut World);
 }
 
-/// A queue of [commands](Command) that get executed at the end of the stage of the system that called them.
+/// A [`Command`] queue to perform impactful changes to the [`World`].
 ///
-/// Commands are executed one at a time in an exclusive fashion.
+/// Since each command requires exclusive access to the `World`,
+/// all queued commands are automatically applied in sequence
+/// only after each system in a [stage] has completed.
+///
+/// The command queue of a system can also be manually applied
+/// by calling [`System::apply_buffers`].
 ///
 /// Each command can be used to modify the [`World`] in arbitrary ways:
 /// * spawning or despawning entities
@@ -66,10 +71,31 @@ pub trait Command: Send + Sync + 'static {
 /// fn my_system(mut commands: Commands) {
 ///    // ...
 /// }
+/// # bevy_ecs::system::assert_is_system(my_system);
 /// ```
 ///
-/// Each command is implemented as a separate method.
-/// Check the [`Command`] trait for a list of available commands (or implement your own!).
+/// # Implementing
+///
+/// Each built-in command is implemented as a separate method, e.g. [`spawn`](#method.spawn).
+/// In addition to the pre-defined command methods, you can add commands with any arbitrary
+/// behavior using [`Commands::add`](#method.add), which accepts any type implementing [`Command`].
+///
+/// Since closures and other functions implement this trait automatically, this allows one-shot,
+/// anonymous custom commands.
+///
+/// ```
+/// # use bevy_ecs::prelude::*;
+/// # fn foo(mut commands: Commands) {
+/// // NOTE: type inference fails here, so annotations are required on the closure.
+/// commands.add(|w: &mut World| {
+///     // Mutate the world however you want...
+///     # todo!();
+/// });
+/// # }
+/// ```
+///
+/// [stage]: crate::schedule::SystemStage
+/// [`System::apply_buffers`]: crate::system::System::apply_buffers
 pub struct Commands<'w, 's> {
     queue: &'s mut CommandQueue,
     entities: &'w Entities,
@@ -143,12 +169,6 @@ impl<'w, 's> Commands<'w, 's> {
             entity,
             commands: self,
         }
-    }
-
-    /// Spawns a [`Bundle`] without pre-allocating an [`Entity`]. The [`Entity`] will be allocated
-    /// when this [`Command`] is applied.
-    pub fn spawn_and_forget(&mut self, bundle: impl Bundle) {
-        self.queue.push(Spawn { bundle });
     }
 
     /// Creates a new entity with the components contained in `bundle`.
@@ -231,17 +251,47 @@ impl<'w, 's> Commands<'w, 's> {
     /// }
     /// # bevy_ecs::system::assert_is_system(example_system);
     /// ```
+    #[inline]
     #[track_caller]
     pub fn entity<'a>(&'a mut self, entity: Entity) -> EntityCommands<'w, 's, 'a> {
-        assert!(
-            self.entities.contains(entity),
-            "Attempting to create an EntityCommands for entity {:?}, which doesn't exist.",
-            entity
-        );
-        EntityCommands {
+        self.get_entity(entity).unwrap_or_else(|| {
+            panic!(
+                "Attempting to create an EntityCommands for entity {:?}, which doesn't exist.",
+                entity
+            )
+        })
+    }
+
+    /// Returns an option containing an [`EntityCommands`] builder for the requested [`Entity`] if it exists, otherwise `None`.
+    /// This does not ensure that the commands will succeed as the entity may no longer exist by the time the associated commands are executed.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use bevy_ecs::prelude::*;
+    ///
+    /// #[derive(Component)]
+    /// struct Label(&'static str);
+
+    /// fn example_system(mut commands: Commands) {
+    ///     // Create a new, empty entity
+    ///     let entity = commands.spawn().id();
+    ///
+    ///     // Get the entity if it still exists, which it will in this case
+    ///     if let Some(mut entity_commands) = commands.get_entity(entity) {
+    ///         // adds a single component to the entity
+    ///         entity_commands.insert(Label("hello world"));
+    ///     }      
+    /// }
+    /// # bevy_ecs::system::assert_is_system(example_system);
+    /// ```
+    #[inline]
+    #[track_caller]
+    pub fn get_entity<'a>(&'a mut self, entity: Entity) -> Option<EntityCommands<'w, 's, 'a>> {
+        self.entities.contains(entity).then_some(EntityCommands {
             entity,
             commands: self,
-        }
+        })
     }
 
     /// Spawns entities to the [`World`] according to the given iterator (or a type that can
@@ -319,7 +369,7 @@ impl<'w, 's> Commands<'w, 's> {
     /// ```
     /// # use bevy_ecs::prelude::*;
     /// #
-    /// # #[derive(Default)]
+    /// # #[derive(Resource, Default)]
     /// # struct Scoreboard {
     /// #     current_score: u32,
     /// #     high_score: u32,
@@ -347,6 +397,7 @@ impl<'w, 's> Commands<'w, 's> {
     /// ```
     /// # use bevy_ecs::prelude::*;
     /// #
+    /// # #[derive(Resource)]
     /// # struct Scoreboard {
     /// #     current_score: u32,
     /// #     high_score: u32,
@@ -373,6 +424,7 @@ impl<'w, 's> Commands<'w, 's> {
     /// ```
     /// # use bevy_ecs::prelude::*;
     /// #
+    /// # #[derive(Resource)]
     /// # struct Scoreboard {
     /// #     current_score: u32,
     /// #     high_score: u32,
@@ -398,7 +450,7 @@ impl<'w, 's> Commands<'w, 's> {
     ///
     /// ```
     /// # use bevy_ecs::{system::Command, prelude::*};
-    /// #[derive(Default)]
+    /// #[derive(Resource, Default)]
     /// struct Counter(u64);
     ///
     /// struct AddToCounter(u64);
@@ -460,6 +512,7 @@ impl<'w, 's, 'a> EntityCommands<'w, 's, 'a> {
     /// ```
     /// # use bevy_ecs::prelude::*;
     /// #
+    /// # #[derive(Resource)]
     /// # struct PlayerEntity { entity: Entity }
     /// # #[derive(Component)]
     /// # struct Health(u32);
@@ -536,6 +589,7 @@ impl<'w, 's, 'a> EntityCommands<'w, 's, 'a> {
     /// ```
     /// # use bevy_ecs::prelude::*;
     /// #
+    /// # #[derive(Resource)]
     /// # struct PlayerEntity { entity: Entity }
     /// #
     /// # #[derive(Component)]
@@ -568,6 +622,7 @@ impl<'w, 's, 'a> EntityCommands<'w, 's, 'a> {
     /// ```
     /// # use bevy_ecs::prelude::*;
     /// #
+    /// # #[derive(Resource)]
     /// # struct TargetEnemy { entity: Entity }
     /// # #[derive(Component)]
     /// # struct Enemy;
@@ -597,6 +652,7 @@ impl<'w, 's, 'a> EntityCommands<'w, 's, 'a> {
     /// ```
     /// # use bevy_ecs::prelude::*;
     /// #
+    /// # #[derive(Resource)]
     /// # struct CharacterToRemove { entity: Entity }
     /// #
     /// fn remove_character_system(
@@ -842,7 +898,7 @@ mod tests {
     use crate::{
         self as bevy_ecs,
         component::Component,
-        system::{CommandQueue, Commands},
+        system::{CommandQueue, Commands, Resource},
         world::World,
     };
     use std::sync::{
@@ -869,7 +925,7 @@ mod tests {
         }
     }
 
-    #[derive(Component)]
+    #[derive(Component, Resource)]
     struct W<T>(T);
 
     fn simple_command(world: &mut World) {
@@ -980,21 +1036,21 @@ mod tests {
         let mut queue = CommandQueue::default();
         {
             let mut commands = Commands::new(&mut queue, &world);
-            commands.insert_resource(123);
-            commands.insert_resource(456.0);
+            commands.insert_resource(W(123i32));
+            commands.insert_resource(W(456.0f64));
         }
 
         queue.apply(&mut world);
-        assert!(world.contains_resource::<i32>());
-        assert!(world.contains_resource::<f64>());
+        assert!(world.contains_resource::<W<i32>>());
+        assert!(world.contains_resource::<W<f64>>());
 
         {
             let mut commands = Commands::new(&mut queue, &world);
             // test resource removal
-            commands.remove_resource::<i32>();
+            commands.remove_resource::<W<i32>>();
         }
         queue.apply(&mut world);
-        assert!(!world.contains_resource::<i32>());
-        assert!(world.contains_resource::<f64>());
+        assert!(!world.contains_resource::<W<i32>>());
+        assert!(world.contains_resource::<W<f64>>());
     }
 }
